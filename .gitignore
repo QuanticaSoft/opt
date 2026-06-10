@@ -1,0 +1,8 @@
+*.bak.*
+*.bak
+logs/
+systemd/
+.env
+storage_state.json
+__pycache__/
+*.pyc
