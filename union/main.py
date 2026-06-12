@@ -1,10 +1,6 @@
 """
-UNImóvil Plus — Pasos 1 a 6
-Uso: python -m union.main
-
-Ejecuta el flujo hasta dejar la pantalla de contraseña con el
-checkbox de imagen de seguridad ya confirmado (listo para ingresar
-la contraseña en el paso 7).
+UNImóvil Plus — Flujo completo pasos 1 a 10
+Uso: python3 -m union.main
 """
 
 from union.config import load_config
@@ -16,6 +12,10 @@ from union.steps import (
     paso4_clic_iniciar_sesion,
     paso5_esperar_pantalla_password,
     paso6_confirmar_imagen_seguridad,
+    paso7_ingresar_password,
+    paso8_leer_saldo,
+    paso9_cerrar_sesion,
+    paso10_cerrar_app,
 )
 
 
@@ -29,10 +29,15 @@ def main() -> None:
     paso4_clic_iniciar_sesion(d)
     paso5_esperar_pantalla_password(d, cfg.nombre_titular)
     paso6_confirmar_imagen_seguridad(d)
+    paso7_ingresar_password(d, cfg.password)
+    saldo = paso8_leer_saldo(d)
 
-    print("\n[OK] Pasos 1-6 completados.")
-    print("     Pantalla de contraseña visible con imagen de seguridad confirmada.")
-    print("     Listo para el Paso 7: ingresar contraseña y hacer login final.")
+    print(f"\n{'='*40}")
+    print(f"  Saldo disponible: Bs. {saldo}")
+    print(f"{'='*40}\n")
+
+    paso9_cerrar_sesion(d)
+    paso10_cerrar_app(d)
 
 
 if __name__ == "__main__":
