@@ -5,6 +5,9 @@ POST /consultar-saldo
   Body JSON: {"usuario": "...", "password": "...", "nombre_titular": "...", "dispositivo": "..."}
   Response:  {"ok": true,  "saldo": "1250.50"}
              {"ok": false, "error": "motivo"}
+
+Concurrencia: un lock por serial ADB — dispositivos distintos corren en paralelo;
+el mismo dispositivo no puede atender dos solicitudes simultáneas.
 """
 
 import threading
@@ -27,8 +30,16 @@ from union.steps import (
 
 app = Flask(__name__)
 
-# Un solo dispositivo Android puede atender una solicitud a la vez
-_lock = threading.Lock()
+# Lock por serial ADB: permite consultas paralelas en dispositivos distintos
+_device_locks: dict[str, threading.Lock] = {}
+_locks_mutex = threading.Lock()
+
+
+def _get_device_lock(serial: str) -> threading.Lock:
+    with _locks_mutex:
+        if serial not in _device_locks:
+            _device_locks[serial] = threading.Lock()
+        return _device_locks[serial]
 
 
 @app.route("/consultar-saldo", methods=["POST"])
@@ -42,8 +53,9 @@ def consultar_saldo():
     if not usuario or not password or not dispositivo:
         return jsonify({"ok": False, "error": "Faltan campos: usuario, password, dispositivo"}), 400
 
-    if not _lock.acquire(blocking=False):
-        return jsonify({"ok": False, "error": "Dispositivo ocupado, reintente en unos segundos"}), 503
+    lock = _get_device_lock(dispositivo)
+    if not lock.acquire(blocking=False):
+        return jsonify({"ok": False, "error": f"Dispositivo {dispositivo} ocupado, reintente en unos segundos"}), 503
 
     try:
         d = u2.connect(dispositivo)
@@ -65,7 +77,7 @@ def consultar_saldo():
         return jsonify({"ok": False, "error": str(exc)}), 500
 
     finally:
-        _lock.release()
+        lock.release()
 
 
 if __name__ == "__main__":
