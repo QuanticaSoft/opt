@@ -221,6 +221,54 @@ sub flush_pending {
 }
 
 # =========================
+# Escaneo inicial: dispositivos ya conectados al arrancar
+# =========================
+sub initial_scan {
+    log_msg("Escaneo inicial de dispositivos USB ya conectados...");
+    my $count = 0;
+    for my $serial_file (glob("/sys/bus/usb/devices/*/serial")) {
+        my $serial = sysfs_read_first_line($serial_file);
+        next if $serial eq '';
+        # Ignorar controladores internos del bus USB (formato 0000:00:xx.x)
+        next if $serial =~ /^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-9a-f]$/i;
+        next if $connected_serial{$serial};
+
+        my $port = $serial_file;
+        $port =~ s{/serial$}{};
+        $port =~ s{.*/}{};
+
+        my $vendor  = sysfs_read_first_line("/sys/bus/usb/devices/$port/idVendor");
+        my $product = sysfs_read_first_line("/sys/bus/usb/devices/$port/idProduct");
+        my $devpath = readlink("/sys/bus/usb/devices/$port") // '';
+        $devpath    =~ s{^\.\./\.\.}{/devices} if $devpath ne '';
+
+        $connected_serial{$serial} = 1;
+        $port_to_serial{$port}     = $serial;
+        remember_serial_info(
+            serial  => $serial,
+            vendor  => $vendor,
+            product => $product,
+            port    => $port,
+            path    => $devpath,
+        );
+
+        log_msg("INITIAL CONNECT serial=$serial vendor=$vendor product=$product port=$port");
+        send_event(
+            action   => 'connect',
+            agent_id => $AGENT_ID,
+            hostname => $hostname,
+            serial   => $serial,
+            vendor   => $vendor,
+            product  => $product,
+            path     => $devpath,
+            ts       => iso_utc(),
+        );
+        $count++;
+    }
+    log_msg("Escaneo inicial completo: $count dispositivo(s) reportado(s).");
+}
+
+# =========================
 # udev monitor (no bloqueante)
 # =========================
 log_msg("Starting USB monitor...");
@@ -233,6 +281,7 @@ fcntl($udev, F_SETFL, $flags | O_NONBLOCK) or die "fcntl(F_SETFL) failed: $!";
 my $sel = IO::Select->new();
 $sel->add($udev);
 
+initial_scan();
 log_msg("Esperando eventos USB...");
 
 my $buf = '';
