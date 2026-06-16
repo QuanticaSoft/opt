@@ -221,6 +221,81 @@ sub flush_pending {
 }
 
 # =========================
+# Reconciliación periódica: sincroniza sysfs con el estado en memoria
+# Corre al arrancar y cada $RECONCILE_INTERVAL segundos en el loop.
+# Detecta tanto conexiones como desconexiones que udevadm pudo haber perdido.
+# =========================
+my $RECONCILE_INTERVAL = 30;   # segundos entre cada reconciliación
+my $last_reconcile     = 0;
+
+sub reconcile_scan {
+    my %sysfs_now;
+
+    # Leer todos los seriales reales conectados en este momento
+    for my $serial_file (glob("/sys/bus/usb/devices/*/serial")) {
+        my $serial = sysfs_read_first_line($serial_file);
+        next if $serial eq '';
+        # Ignorar controladores internos del bus USB (formato 0000:00:xx.x)
+        next if $serial =~ /^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-9a-f]$/i;
+
+        my $port = $serial_file;
+        $port =~ s{/serial$}{};
+        $port =~ s{.*/}{};
+        $sysfs_now{$serial} = $port;
+    }
+
+    # — Nuevas conexiones: en sysfs pero no en memoria —
+    for my $serial (keys %sysfs_now) {
+        next if $connected_serial{$serial};
+
+        my $port    = $sysfs_now{$serial};
+        my $vendor  = sysfs_read_first_line("/sys/bus/usb/devices/$port/idVendor");
+        my $product = sysfs_read_first_line("/sys/bus/usb/devices/$port/idProduct");
+        my $devpath = readlink("/sys/bus/usb/devices/$port") // '';
+        $devpath =~ s{^\.\./\.\.}{/devices} if $devpath ne '';
+
+        $connected_serial{$serial} = 1;
+        $port_to_serial{$port}     = $serial;
+        remember_serial_info(
+            serial  => $serial, vendor  => $vendor,
+            product => $product, port   => $port, path => $devpath,
+        );
+
+        log_msg("RECONCILE CONNECT serial=$serial vendor=$vendor product=$product port=$port");
+        send_event(
+            action   => 'connect',   agent_id => $AGENT_ID,
+            hostname => $hostname,   serial   => $serial,
+            vendor   => $vendor,     product  => $product,
+            path     => $devpath,    ts       => iso_utc(),
+        );
+    }
+
+    # — Desconexiones perdidas: en memoria pero ya no en sysfs —
+    for my $serial (keys %connected_serial) {
+        next if exists $sysfs_now{$serial};
+        # No interferir con desconexiones que ya están en gracia pendiente
+        next if grep { ($pending_disconnect{$_}{serial} // '') eq $serial } keys %pending_disconnect;
+
+        my $info    = $serial_info{$serial} // {};
+        my $port    = $info->{last_port} // '';
+        my $vendor  = $info->{vendor}    // '';
+        my $product = $info->{product}   // '';
+        my $devpath = $info->{last_path} // '';
+
+        delete $connected_serial{$serial};
+        delete $port_to_serial{$port} if $port ne '';
+
+        log_msg("RECONCILE DISCONNECT serial=$serial vendor=$vendor product=$product port=$port");
+        send_event(
+            action   => 'disconnect', agent_id => $AGENT_ID,
+            hostname => $hostname,    serial   => $serial,
+            vendor   => $vendor,      product  => $product,
+            path     => $devpath,     ts       => iso_utc(),
+        );
+    }
+}
+
+# =========================
 # udev monitor (no bloqueante)
 # =========================
 log_msg("Starting USB monitor...");
@@ -233,6 +308,8 @@ fcntl($udev, F_SETFL, $flags | O_NONBLOCK) or die "fcntl(F_SETFL) failed: $!";
 my $sel = IO::Select->new();
 $sel->add($udev);
 
+reconcile_scan();   # escaneo inmediato al arrancar
+$last_reconcile = time();
 log_msg("Esperando eventos USB...");
 
 my $buf = '';
@@ -241,6 +318,13 @@ my %props;
 
 while (1) {
   flush_pending();
+
+  # Reconciliación periódica cada $RECONCILE_INTERVAL segundos
+  my $now_t = time();
+  if ($now_t - $last_reconcile >= $RECONCILE_INTERVAL) {
+      reconcile_scan();
+      $last_reconcile = $now_t;
+  }
 
   my @ready = $sel->can_read(1.0);
   next if !@ready;
