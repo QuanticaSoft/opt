@@ -13,6 +13,14 @@ class Config:
     nombre_titular: str
 
 
+@dataclass
+class OficinaConfig:
+    alias: str
+    cuenta: str
+    banco: str
+    moneda: str
+
+
 def load_config() -> Config:
     usuario = os.getenv("BU_USUARIO")
     password = os.getenv("BU_PASSWORD")
@@ -32,3 +40,18 @@ def load_config() -> Config:
         dispositivo=dispositivo,
         nombre_titular=nombre_titular,
     )
+
+
+def load_oficina_config() -> OficinaConfig:
+    alias = os.getenv("BU_OFICINA_ALIAS")
+    cuenta = os.getenv("BU_OFICINA_CUENTA")
+    banco = os.getenv("BU_OFICINA_BANCO")
+    moneda = os.getenv("BU_OFICINA_MONEDA", "BOLIVIANOS")
+
+    if not all([alias, cuenta, banco]):
+        raise RuntimeError(
+            "Faltan variables de entorno para la cuenta oficina. El archivo .env debe tener:\n"
+            "  BU_OFICINA_ALIAS, BU_OFICINA_CUENTA, BU_OFICINA_BANCO"
+        )
+
+    return OficinaConfig(alias=alias, cuenta=cuenta, banco=banco, moneda=moneda)
