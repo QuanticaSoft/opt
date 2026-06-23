@@ -142,7 +142,7 @@ def debitar():
 
         paso11_abrir_menu_transferencia_ach(d)
         paso12_validar_horario_ach(d)
-        paso13_buscar_destinatario(d, oficina.alias)
+        paso13_buscar_destinatario(d, oficina.alias, oficina.banco)
         paso14_verificar_destinatario(d, oficina.cuenta, oficina.banco)
         paso15_seleccionar_cuenta_origen(d)
         paso16_ingresar_monto_moneda_glosa(d, monto, glosa, oficina.moneda)

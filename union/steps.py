@@ -24,8 +24,17 @@ def paso1_lanzar_app(d: u2.Device) -> None:
     """Enciende la pantalla y arranca UNImóvil Plus desde cero."""
     print("[PASO 1] Encendiendo pantalla y lanzando app...")
     d.screen_on()
+    d.unlock()
     time.sleep(1)
-    d.app_start(APP_PACKAGE, stop=True)
+    # Cerrar todo antes de lanzar: home -> force-stop -> kill background
+    d.press("home")
+    time.sleep(0.5)
+    d.shell("am force-stop " + APP_PACKAGE)
+    time.sleep(0.5)
+    d.shell("am kill-all")
+    time.sleep(1)
+    d.app_start(APP_PACKAGE)
+    time.sleep(2)
     print("[PASO 1] App lanzada.")
 
 
@@ -44,7 +53,7 @@ def paso2_esperar_login(d: u2.Device) -> None:
     """
     print("[PASO 2] Esperando pantalla de login...")
     campo = d(className="android.widget.EditText")
-    if not campo.wait(timeout=15):
+    if not campo.wait(timeout=30):
         raise RuntimeError(
             "[PASO 2] El campo de usuario no apareció en 15 s.\n"
             "La app puede estar colgada en el splash o no se instaló correctamente."
