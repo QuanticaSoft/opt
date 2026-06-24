@@ -278,15 +278,23 @@ def _scroll_hasta_encontrar(d: u2.Device, selector, max_intentos: int = 5, y_ini
     return None
 
 
+_RE_RELOJ = re.compile(r"\d{1,2}:\d{2}")
+
+
 def _esperar_pantalla_estable(d: u2.Device, intentos: int = 6, pausa: float = 0.5) -> None:
     """
     Espera a que el WebView termine de renderizar tras una transicion de pantalla
     (p.ej. tras tocar CONTINUAR, la pantalla de Verificacion de Datos tarda en
     cargar). Compara dumps de jerarquia sucesivos hasta que dejen de cambiar.
+
+    La pantalla de Verificacion de Datos incluye un contador "MM:SS Min. por
+    cambiar" de la Clave Transaccional que se actualiza cada segundo, por lo
+    que el dump nunca es identico al anterior si se compara literal. Se quita
+    ese patron antes de comparar para detectar la verdadera estabilidad.
     """
     anterior = None
     for _ in range(intentos):
-        actual = d.dump_hierarchy()
+        actual = _RE_RELOJ.sub("", d.dump_hierarchy())
         if actual == anterior:
             return
         anterior = actual
@@ -425,10 +433,17 @@ def paso17_continuar_y_confirmar(d: u2.Device, cuenta_esperada: str, banco_esper
     # Esta pantalla es mas larga que las anteriores (incluye Comision, Total a
     # debitar, Glosa y Clave Transaccional antes del boton), por lo que el
     # swipe corto por defecto de _scroll_hasta_encontrar no alcanza a revelarlo.
+    # En produccion la app/red puede tardar mas que en pruebas interactivas en
+    # terminar de renderizar el WebView, por lo que se dan mas intentos/tiempo.
     btn_confirmar = _scroll_hasta_encontrar(
-        d, d(textContains="CONFIRMAR"), max_intentos=8, y_inicio=1300, y_fin=700, steps=10, pausa=0.8,
+        d, d(textContains="CONFIRMAR"), max_intentos=15, y_inicio=1300, y_fin=700, steps=10, pausa=1.0,
     )
     if btn_confirmar is None or not btn_confirmar.wait(timeout=12):
+        # No se pudo confirmar: retroceder en vez de dejar el dispositivo a
+        # medias en la pantalla de Verificacion de Datos (afectaria la
+        # siguiente solicitud sobre el mismo dispositivo). No se ha tocado
+        # CONFIRMAR en ningun momento, asi que es seguro retroceder.
+        d.press("back")
         raise RuntimeError("[PASO 17] No se encontro el boton CONFIRMAR.")
     btn_confirmar.click()
     time.sleep(3)
@@ -441,8 +456,11 @@ def paso17_continuar_y_confirmar(d: u2.Device, cuenta_esperada: str, banco_esper
 
 def paso18_leer_numero_envio(d: u2.Device) -> dict:
     print("[PASO 18] Leyendo comprobante de confirmacion...")
-    if not d(textContains="OPERACION PENDIENTE DE CONFIRMACION").wait(timeout=10) and \
-       not d(textContains="OPERACIÓN PENDIENTE DE CONFIRMACIÓN").wait(timeout=2):
+    # "PENDIENTE DE CONFIRMACI" es prefijo comun a "CONFIRMACION"/"CONFIRMACIÓN",
+    # evita depender de si la app acentua o no. La confirmacion ACH real puede
+    # tardar varios segundos en responder, por eso se da un solo timeout largo
+    # en vez de partirlo en dos intentos cortos.
+    if not d(textContains="PENDIENTE DE CONFIRMACI").wait(timeout=20):
         raise RuntimeError("[PASO 18] No se confirmo la operacion (no aparecio el mensaje esperado).")
 
     hierarchy = d.dump_hierarchy()
