@@ -1,0 +1,17 @@
+[Unit]
+Description=Gyros Union HTTP Server (saldo/debito)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=robot
+WorkingDirectory=/opt/gyros/agent
+ExecStart=/usr/bin/python3 -m union.server
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

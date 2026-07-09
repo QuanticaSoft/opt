@@ -1,0 +1,23 @@
+[Unit]
+Description=Reverse SSH tunnel gyros agent-01 -> flamenco port 8080
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=robot
+Environment="AUTOSSH_GATETIME=0"
+ExecStartPre=/usr/local/bin/gyros-tunnel-cleanup.sh
+ExecStart=/usr/bin/autossh -M 0 \
+  -i /home/robot/.ssh/id_ed25519_flamenco \
+  -o StrictHostKeyChecking=no \
+  -o ServerAliveInterval=30 \
+  -o ServerAliveCountMax=3 \
+  -o ExitOnForwardFailure=yes \
+  -o TCPKeepAlive=yes \
+  -N -R 127.0.0.1:8080:127.0.0.1:8080 \
+  marco@flamenco.cnb.net
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
