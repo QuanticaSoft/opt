@@ -59,14 +59,54 @@ diagnosticar en qué punto de la UI se atoró la automatización.
 - `/home/robot/.ssh/id_ed25519_flamenco` — llave del túnel inverso.
 - `AGENT_TOKEN` hardcodeado en `heartbeat.pl` y `detecta.pl` (ver hallazgo #3).
 
-## Hallazgos abiertos (revisión 2026-07-13)
+## Hallazgos
 
-1. **Túnel inestable ahora mismo**: `gyros-tunnel.service` reinicia en bucle cada 1-4 min
-   alternando `remote port forwarding failed for listen port 8080` y
-   `Connection timed out` hacia `flamenco.cnb.net:22`. El backend probablemente no puede
-   alcanzar el agente durante estas ventanas. Revisar en `flamenco` si otro proceso ocupa
-   el puerto 8080 remoto o si hay pérdida de conectividad intermitente hacia esa IP.
-   Chequeo: `journalctl -u gyros-tunnel -n 50 --no-pager`.
+1. **[RESUELTO 2026-07-13, puede repetirse] Túnel se queda colgado tras un corte de red.**
+   Causa raíz confirmada: `flamenco.cnb.net` **no se cae** (826 días de uptime sin reboot).
+   Lo que pasa es un corte de red transitorio entre el cliente (`agent-01` o cualquier
+   origen) y flamenco; `autossh` detecta la conexión muerta vía `ServerAliveInterval` y
+   reconecta del lado del agente, pero la sesión SSH vieja del lado de **flamenco** queda
+   huérfana reteniendo el bind de `127.0.0.1:8080` (nadie le avisó que el cliente se fue).
+   Los reintentos posteriores fallan con `remote port forwarding failed for listen port 8080`
+   hasta que esa sesión muere o se mata a mano.
+
+   Diagnóstico: en flamenco, `sshd` reescribe el título del proceso por privilege
+   separation, así que no se puede distinguir la sesión del túnel por su comando. La única
+   señal fiable es la columna TTY: la sesión de solo-reenvío (`-N`, sin comando ni pty)
+   aparece como `sshd-session: marco` con TTY `?`; una sesión interactiva real tendría una
+   pty (`pts/N`); una ejecución de comando puntual aparece como `sshd-session: marco@notty`.
+
+   Fix aplicado: `systemd/gyros-tunnel-cleanup.sh` ahora mata exactamente esa sesión
+   (título exacto + tty `?`) en vez del patrón viejo `sshd.*notty`, que nunca coincidía con
+   nada real (commit `ad745b3`, pusheado a `origin/develop`).
+
+   **Limitación que queda pendiente**: `gyros-tunnel-cleanup.sh` corre como
+   `ExecStartPre`, que systemd solo dispara cuando el *unit* se reinicia — no cuando
+   `autossh` reconecta internamente (que es lo normal en este servicio: el proceso padre de
+   `autossh` nunca muere, solo relanza el `ssh` hijo). Es decir: el fix garantiza que la
+   próxima vez que alguien reinicie el servicio (`systemctl restart gyros-tunnel`) o
+   reboot ee agent-01, la limpieza va a funcionar bien. Pero si vuelve a haber un corte de
+   red mientras el servicio sigue "activo" sin reiniciarse, el síntoma (puerto 8080
+   retenido) puede repetirse y va a requerir un `systemctl restart gyros-tunnel` manual
+   (o pedirle a alguien con sudo en flamenco que mate la sesión vieja).
+
+   Fix estructural pendiente (no aplicado, requiere decisión del usuario): reemplazar
+   `autossh` por `ssh` directo en `gyros-tunnel.service` + `Restart=always` de systemd (ya
+   está puesto `-M 0` en autossh, o sea el monitor-port de autossh está deshabilitado y
+   autossh hoy solo aporta "reiniciar ssh si muere", que systemd ya hace solo). Así
+   `ExecStartPre` se dispararía en cada reconexión real, no solo al (re)iniciar el
+   servicio completo.
+
+   Alternativa de raíz descartada por ahora: `ClientAliveInterval`/`ClientAliveCountMax`
+   en el `sshd_config` de flamenco resolvería esto del lado servidor sin importar el
+   cliente. No se aplicó porque **`marco` no tiene sudo en flamenco** (confirmado:
+   "marco is not in the sudoers file. This incident has been reported to the
+   administrator." — no reintentar sudo ahí sin credenciales de un usuario que sí sea
+   sudoer, para no seguir generando alertas de seguridad).
+
+   Chequeo rápido: `journalctl -u gyros-tunnel -n 30 --no-pager`. Si reaparece
+   "remote port forwarding failed", correr `systemctl restart gyros-tunnel` (pide sudo).
+
 2. **Procesos duplicados**: `heartbeat.pl` y `detecta.pl` corren dos veces cada uno — una
    copia como hijos forkeados de `gyros-agent.pl` (vía `gyros-agent.service`) y otra
    independiente (`gyros-heartbeat.service`; `detecta.pl` no tiene unit propio pero el
@@ -96,8 +136,11 @@ diagnosticar en qué punto de la UI se atoró la automatización.
 1. `git -C /opt/gyros/agent status && git -C /opt/gyros/agent log --oneline -5` — detectar
    cambios de otra persona antes de tocar nada.
 2. `systemctl status gyros-agent gyros-heartbeat gyros-usb-monitor gyros-union-server gyros-tunnel --no-pager`
-3. `journalctl -u gyros-tunnel -n 20 --no-pager` — confirmar si el túnel sigue
-   reconectando en bucle (hallazgo #1).
+3. `journalctl -u gyros-tunnel -n 20 --no-pager` — si aparece repetido
+   `remote port forwarding failed for listen port 8080`, es la sesión huérfana en
+   flamenco otra vez (hallazgo #1, resuelto para el script pero no para el trigger). Un
+   `systemctl restart gyros-tunnel` (pide sudo) debería resolverlo, ya que el cleanup
+   script corregido corre en cada `ExecStartPre`.
 4. `adb devices` — confirmar que el teléfono sigue conectado.
 5. `ps aux | grep -E "heartbeat.pl|detecta.pl"` — vigilar acumulación de procesos
    huérfanos (hallazgo #2).
@@ -109,6 +152,20 @@ diagnosticar en qué punto de la UI se atoró la automatización.
 
 ## Notas de conexión
 
-Acceso actual por password vía `sshpass`. Para trabajo recurrente con `/loop` conviene
-autorizar una llave pública en `~/.ssh/authorized_keys` de `robot@100.107.84.95` y evitar
-reutilizar la contraseña en cada sesión.
+- `robot@100.107.84.95` (agent-01): acceso por llave pública ya autorizado en
+  `~/.ssh/authorized_keys` (2026-07-13) — no hace falta password para entrar.
+- `marco@flamenco.cnb.net`: solo alcanzable con la llave dedicada del túnel
+  (`/home/robot/.ssh/id_ed25519_flamenco`, vive en agent-01, no localmente). Para
+  diagnosticar flamenco desde una sesión nueva, saltar por agent-01:
+  `ssh robot@100.107.84.95 "ssh -i /home/robot/.ssh/id_ed25519_flamenco -o BatchMode=yes marco@flamenco.cnb.net 'comando'"`.
+  Este salto es lento (~15-20s por llamada) — agrupar varios chequeos en un solo comando
+  remoto en vez de hacer llamadas sueltas.
+- **`marco` no tiene sudo en flamenco** (confirmado 2026-07-13: "marco is not in the
+  sudoers file. This incident has been reported to the administrator."). No reintentar
+  sudo ahí sin credenciales de un usuario que sí sea sudoer real — ya generó una alerta de
+  seguridad una vez. Cambios que requieran root en flamenco (p.ej. `sshd_config`) necesitan
+  que el usuario los aplique él mismo o dé acceso a otra cuenta con sudo real.
+- flamenco tiene otros servicios corriendo para `marco` (PM2, VSCode Server, `php-fpm:
+  pool gyros`) — cualquier limpieza de sesiones/procesos ahí debe ser quirúrgica, nunca
+  un pattern-match amplio (ver hallazgo #1 sobre por qué `ps`/título de proceso no alcanza
+  para distinguir sesiones).
