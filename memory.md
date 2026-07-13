@@ -61,7 +61,7 @@ diagnosticar en qué punto de la UI se atoró la automatización.
 
 ## Hallazgos
 
-1. **[RESUELTO 2026-07-13, puede repetirse] Túnel se queda colgado tras un corte de red.**
+1. **[RESUELTO 2026-07-13] Túnel se queda colgado tras un corte de red.**
    Causa raíz confirmada: `flamenco.cnb.net` **no se cae** (826 días de uptime sin reboot).
    Lo que pasa es un corte de red transitorio entre el cliente (`agent-01` o cualquier
    origen) y flamenco; `autossh` detecta la conexión muerta vía `ServerAliveInterval` y
@@ -80,22 +80,18 @@ diagnosticar en qué punto de la UI se atoró la automatización.
    (título exacto + tty `?`) en vez del patrón viejo `sshd.*notty`, que nunca coincidía con
    nada real (commit `ad745b3`, pusheado a `origin/develop`).
 
-   **Limitación que queda pendiente**: `gyros-tunnel-cleanup.sh` corre como
-   `ExecStartPre`, que systemd solo dispara cuando el *unit* se reinicia — no cuando
-   `autossh` reconecta internamente (que es lo normal en este servicio: el proceso padre de
-   `autossh` nunca muere, solo relanza el `ssh` hijo). Es decir: el fix garantiza que la
-   próxima vez que alguien reinicie el servicio (`systemctl restart gyros-tunnel`) o
-   reboot ee agent-01, la limpieza va a funcionar bien. Pero si vuelve a haber un corte de
-   red mientras el servicio sigue "activo" sin reiniciarse, el síntoma (puerto 8080
-   retenido) puede repetirse y va a requerir un `systemctl restart gyros-tunnel` manual
-   (o pedirle a alguien con sudo en flamenco que mate la sesión vieja).
-
-   Fix estructural pendiente (no aplicado, requiere decisión del usuario): reemplazar
-   `autossh` por `ssh` directo en `gyros-tunnel.service` + `Restart=always` de systemd (ya
-   está puesto `-M 0` en autossh, o sea el monitor-port de autossh está deshabilitado y
-   autossh hoy solo aporta "reiniciar ssh si muere", que systemd ya hace solo). Así
-   `ExecStartPre` se dispararía en cada reconexión real, no solo al (re)iniciar el
-   servicio completo.
+   **Fix estructural aplicado (2026-07-13, commit `4eebddf`)**: `gyros-tunnel.service`
+   reemplazó `autossh` por `ssh` directo bajo `Restart=always` (+ `StartLimitIntervalSec=0`
+   para que systemd nunca se rinda, igual que hacía `autossh`). `autossh` corría con
+   `-M 0` (su propio monitor-port deshabilitado), así que solo aportaba "reiniciar ssh si
+   muere" — algo que systemd ya hacía solo. El problema real era que `ExecStartPre`
+   (la limpieza) solo se disparaba al (re)iniciar el *unit* completo, nunca cuando
+   `autossh` reconectaba internamente (su proceso padre nunca moría). Con `ssh` directo,
+   cualquier caída del proceso hace que systemd reinicie el unit completo y vuelva a
+   correr `ExecStartPre` en cada intento — **verificado matando el proceso ssh a la
+   fuerza** (`kill -9`): systemd detectó la caída, corrió el cleanup, y reconectó solo en
+   ~15s sin intervención manual. Ya no debería requerir un restart manual ante un corte de
+   red futuro.
 
    Alternativa de raíz descartada por ahora: `ClientAliveInterval`/`ClientAliveCountMax`
    en el `sshd_config` de flamenco resolvería esto del lado servidor sin importar el
@@ -136,11 +132,12 @@ diagnosticar en qué punto de la UI se atoró la automatización.
 1. `git -C /opt/gyros/agent status && git -C /opt/gyros/agent log --oneline -5` — detectar
    cambios de otra persona antes de tocar nada.
 2. `systemctl status gyros-agent gyros-heartbeat gyros-usb-monitor gyros-union-server gyros-tunnel --no-pager`
-3. `journalctl -u gyros-tunnel -n 20 --no-pager` — si aparece repetido
-   `remote port forwarding failed for listen port 8080`, es la sesión huérfana en
-   flamenco otra vez (hallazgo #1, resuelto para el script pero no para el trigger). Un
-   `systemctl restart gyros-tunnel` (pide sudo) debería resolverlo, ya que el cleanup
-   script corregido corre en cada `ExecStartPre`.
+3. `journalctl -u gyros-tunnel -n 20 --no-pager` — el servicio ahora es autosanable
+   (hallazgo #1): `ssh` directo + `Restart=always` reejecuta `ExecStartPre` en cada
+   reconexión, así que un `remote port forwarding failed` aislado debería resolverse
+   solo en ~15s sin intervención. Si el patrón se repite en bucle por más de un par de
+   minutos, ahí sí investigar (podría ser flamenco realmente caído, no solo una sesión
+   huérfana).
 4. `adb devices` — confirmar que el teléfono sigue conectado.
 5. `ps aux | grep -E "heartbeat.pl|detecta.pl"` — vigilar acumulación de procesos
    huérfanos (hallazgo #2).
