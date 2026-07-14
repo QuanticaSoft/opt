@@ -21,17 +21,19 @@ El resultado se expone vía HTTP (Flask, puerto 8080) y se tuneliza por SSH inve
 
 ## Inventario de servicios (systemd)
 
-| Unit | Script | Rol | Usuario |
-|---|---|---|---|
-| `gyros-agent.service` | `gyros-agent.pl` | Proceso supervisor: hace `fork()+exec` de `heartbeat.pl` y `detecta.pl`, loguea "alive" cada 60s | root |
-| `gyros-heartbeat.service` | `heartbeat.pl` | Heartbeat HTTP a `quanticasoft.com/gyrosfe/agent/heartbeat.php` cada 60s | root |
-| `gyros-usb-monitor.service` | `usb-monitor.pl` | Escucha `udevadm monitor`, envía eventos USB por socket TCP crudo a `BACKEND_HOST:BACKEND_PORT` (`config.conf` → `flamenco.cnb.net:4000`) | root |
-| `gyros-union-server.service` | `python3 -m union.server` | Servidor Flask (saldo/débito), puerto 8080 local | robot |
-| `gyros-tunnel.service` | `autossh` | Túnel SSH inverso `agent-01 → flamenco.cnb.net`, expone el puerto 8080 local en `127.0.0.1:8080` de flamenco | robot |
+| Unit | Script | Rol | Usuario | Estado |
+|---|---|---|---|---|
+| `gyros-agent.service` | `gyros-agent.pl` | Proceso supervisor: hace `fork()+exec` de `heartbeat.pl` y `detecta.pl` (única copia de cada uno desde 2026-07-13), loguea "alive" cada 60s | root | activo |
+| `gyros-heartbeat.service` | `heartbeat.pl` | Heartbeat HTTP redundante a `quanticasoft.com/gyrosfe/agent/heartbeat.php` | root | **deshabilitado 2026-07-13** (ver hallazgo #2) |
+| `usb-agent.service` ⚠️ sin prefijo `gyros-` | `detecta.pl` | Detección USB redundante (+ `udevadm monitor` propio) | root | **deshabilitado 2026-07-13** (ver hallazgo #2) |
+| `gyros-usb-monitor.service` | `usb-monitor.pl` | Escucha `udevadm monitor`, envía eventos USB por socket TCP crudo a `BACKEND_HOST:BACKEND_PORT` (`config.conf` → `flamenco.cnb.net:4000`) | root | activo |
+| `gyros-union-server.service` | `python3 -m union.server` | Servidor Flask (saldo/débito), puerto 8080 local | robot | activo |
+| `gyros-tunnel.service` | `ssh` directo (`Restart=always`, ya no `autossh`, ver hallazgo #1) | Túnel SSH inverso `agent-01 → flamenco.cnb.net`, expone el puerto 8080 local en `127.0.0.1:8080` de flamenco | robot | activo |
 
 Comando rápido de salud:
 ```
-systemctl status gyros-agent gyros-heartbeat gyros-usb-monitor gyros-union-server gyros-tunnel --no-pager
+systemctl status gyros-agent gyros-usb-monitor gyros-union-server gyros-tunnel --no-pager
+systemctl status gyros-heartbeat usb-agent --no-pager   # deben mostrar inactive/disabled
 ```
 
 ## Flujo funcional (`union/steps.py`, `union/steps_transferencia.py`)
@@ -103,31 +105,32 @@ diagnosticar en qué punto de la UI se atoró la automatización.
    Chequeo rápido: `journalctl -u gyros-tunnel -n 30 --no-pager`. Si reaparece
    "remote port forwarding failed", correr `systemctl restart gyros-tunnel` (pide sudo).
 
-2. **[PARCIALMENTE RESUELTO 2026-07-13] Procesos duplicados**: `heartbeat.pl` y
-   `detecta.pl` corrían dos veces cada uno por **4 unidades systemd independientes y
-   solapadas**, ninguna trackeada en `systemd/` del repo (alguien las desplegó a mano
-   directo en `/etc/systemd/system/`, por fuera de git). No eran huérfanos de un restart
-   (hipótesis anterior, descartada): los procesos arrancaban todos en el boot del sistema.
+2. **[RESUELTO 2026-07-13] Procesos duplicados**: `heartbeat.pl` y `detecta.pl` corrían
+   dos veces cada uno por **4 unidades systemd independientes y solapadas**, ninguna
+   trackeada en `systemd/` del repo (alguien las desplegó a mano directo en
+   `/etc/systemd/system/`, por fuera de git). No eran huérfanos de un restart (hipótesis
+   anterior, descartada): los procesos arrancaban todos en el boot del sistema.
 
    | Unit | Qué corre | Estado (2026-07-13) |
    |---|---|---|
-   | `gyros-agent.service` | `gyros-agent.pl` → hace `fork()` de `heartbeat.pl` y `detecta.pl` | activo (es la copia que se conserva) |
-   | `gyros-heartbeat.service` | `heartbeat.pl` directo | **sigue activo — heartbeat sigue duplicado** |
+   | `gyros-agent.service` | `gyros-agent.pl` → hace `fork()` de `heartbeat.pl` y `detecta.pl` | activo (es la copia que se conserva de ambos) |
+   | `gyros-heartbeat.service` | `heartbeat.pl` directo | **deshabilitado y detenido** (`systemctl stop` + `disable`, 2026-07-13) |
    | `usb-agent.service` ⚠️ sin prefijo `gyros-` | `detecta.pl` directo (+ su propio `udevadm monitor` hijo) | **deshabilitado y detenido** (`systemctl stop` + `disable`, 2026-07-13) |
    | `gyros-usb-monitor.service` | `usb-monitor.pl` (script y backend distintos, no es el duplicado) | activo, sin cambios |
 
-   `detecta.pl` ya solo corre una vez (el fork de `gyros-agent.pl`, PID hijo de 777) —
-   duplicación de eventos USB resuelta. **`heartbeat.pl` sigue duplicado** (una copia vía
-   `gyros-agent.service`, otra vía `gyros-heartbeat.service`) — no se tocó, pendiente de
-   decisión explícita del usuario sobre cuál copia conservar.
+   Ahora `heartbeat.pl` y `detecta.pl` corren una sola vez cada uno, ambos como hijos de
+   `gyros-agent.pl` (PID 777) — duplicación de heartbeats y eventos USB al backend
+   resuelta por completo.
 
-   Nota: `usb-agent.service` solo se detuvo/deshabilitó (`systemctl disable` quitó el
-   symlink en `multi-user.target.wants`), el archivo unit sigue en
-   `/etc/systemd/system/usb-agent.service` por si hace falta revertir. No se eliminó.
+   Nota: ambas unidades se detuvieron/deshabilitaron (`systemctl disable` quitó el
+   symlink en `multi-user.target.wants`), los archivos unit siguen en
+   `/etc/systemd/system/{gyros-heartbeat,usb-agent}.service` por si hace falta revertir.
+   No se eliminaron.
 
-   Chequeo: `systemctl status usb-agent` debe mostrar `inactive`/`disabled`;
-   `ps -o pid,ppid,cmd -e | grep -E "detecta.pl|heartbeat.pl"` debe mostrar 3 procesos
-   (1x detecta, 2x heartbeat) en vez de los 4 originales.
+   Chequeo: `systemctl status usb-agent gyros-heartbeat` debe mostrar
+   `inactive`/`disabled` en ambas; `ps -o pid,ppid,cmd -e | grep -E "detecta.pl|heartbeat.pl"`
+   debe mostrar exactamente 2 procesos (uno de cada uno, ambos con PPID 777) en vez de los
+   4 originales.
 3. **Token de agente sin configurar**: `AGENT_TOKEN = 'TOKEN_SECRETO'` en ambos scripts
    Perl parece un placeholder nunca reemplazado por un valor real. Verificar con el backend
    si de verdad valida este header o si el agente está efectivamente sin autenticar.
@@ -148,8 +151,10 @@ diagnosticar en qué punto de la UI se atoró la automatización.
 
 1. `git -C /opt/gyros/agent status && git -C /opt/gyros/agent log --oneline -5` — detectar
    cambios de otra persona antes de tocar nada.
-2. `systemctl status gyros-agent gyros-heartbeat gyros-usb-monitor gyros-union-server gyros-tunnel usb-agent --no-pager`
-   (`usb-agent.service` sin prefijo `gyros-` — ver hallazgo #2, se escapa fácil de un grep "gyros*")
+2. `systemctl status gyros-agent gyros-usb-monitor gyros-union-server gyros-tunnel --no-pager`
+   + `systemctl status gyros-heartbeat usb-agent --no-pager` (deben seguir `inactive`/
+   `disabled` — ver hallazgo #2; `usb-agent.service` no tiene prefijo `gyros-`, se escapa
+   fácil de un grep "gyros*")
 3. `journalctl -u gyros-tunnel -n 20 --no-pager` — el servicio ahora es autosanable
    (hallazgo #1): `ssh` directo + `Restart=always` reejecuta `ExecStartPre` en cada
    reconexión, así que un `remote port forwarding failed` aislado debería resolverse
@@ -157,11 +162,10 @@ diagnosticar en qué punto de la UI se atoró la automatización.
    minutos, ahí sí investigar (podría ser flamenco realmente caído, no solo una sesión
    huérfana).
 4. `adb devices` — confirmar que el teléfono sigue conectado.
-5. `ps aux | grep -E "heartbeat.pl|detecta.pl"` — se espera ver 3 procesos estables: 1x
-   `detecta.pl` (hijo de `gyros-agent.pl`) + 2x `heartbeat.pl` (uno vía
-   `gyros-agent.service`, otro vía `gyros-heartbeat.service` — duplicación conocida y
-   pendiente, hallazgo #2). Si aparece un segundo `detecta.pl` o el conteo crece con el
-   tiempo, algo reactivó `usb-agent.service` o hay una fuga nueva — investigar.
+5. `ps aux | grep -E "heartbeat.pl|detecta.pl"` — se espera ver exactamente 2 procesos,
+   uno de cada uno, ambos con PPID = PID de `gyros-agent.pl` (hallazgo #2, resuelto). Si
+   aparece un segundo `detecta.pl` o `heartbeat.pl`, algo reactivó `usb-agent.service` o
+   `gyros-heartbeat.service` (o hay una fuga nueva) — investigar.
 6. `df -h /` — espacio en disco (98G total, ~76G libres a la fecha de esta revisión).
 7. Reportar solo lo que cambió respecto a la iteración anterior — evitar ruido si el
    estado es idéntico.
