@@ -2,6 +2,10 @@
 
 > Host: `agent-01` (Ubuntu 22.04, kernel 5.15) — Tailscale IP `100.107.84.95`, usuario `robot`.
 > Ruta: `/opt/gyros/agent`. Repo git: `origin git@github.com:QuanticaSoft/opt.git`, rama `develop`.
+> **Desde 2026-09-09 este agente se identifica como `cbb01` (Cochabamba)** en `AGENT_ID`
+> (`config.conf`, `heartbeat.pl`, `detecta.pl`) y en la tabla `Agent` de la DB — el hostname
+> del sistema operativo sigue siendo `agent-01`, solo cambió el identificador lógico. Ver
+> hallazgo #8: ahora hay un segundo agente en paralelo (`scz01`, Santa Cruz).
 > Este archivo existe para dar contexto persistente a sesiones de `/loop` (u otras sesiones
 > nuevas) que no arrancan con el historial de esta conversación. Mantenerlo actualizado tras
 > cada hallazgo relevante — es más barato leer esto que re-explorar todo el proyecto.
@@ -146,6 +150,48 @@ diagnosticar en qué punto de la UI se atoró la automatización.
    revisión (`29a2db3` es el HEAD local).
 7. Backups sueltos en la raíz (`detecta.pl.bak.*`) — ya cubiertos por `.gitignore`
    (`*.bak*`), no se trackean, pero conviene limpiarlos del filesystem.
+
+8. **[2026-09-09] Rename a `cbb01` + segundo agente en paralelo (`scz01`, Santa Cruz)**.
+   Se necesitaba un segundo agente de producción en otra ciudad, corriendo al mismo tiempo
+   que este (no en reemplazo). Cambios hechos, todos sobre la rama `nuevo_agente` (no
+   `main`, para poder volver atrás limpio):
+
+   - `AGENT_ID` pasó de `agent-01` a `cbb01` en `config.conf`, `heartbeat.pl`, `detecta.pl`
+     (mismo `AGENT_TOKEN`, sin cambiar) y en la fila de la tabla `Agent` en la DB de
+     gyrosfe. Reinicio de `gyros-agent`/`gyros-usb-monitor` coordinado con el UPDATE de la
+     DB para minimizar la ventana de heartbeats fallando por `agentId` desconocido.
+   - Nueva columna `"Agent"."tunnelPort"` (migración
+     `migrations/2026_agent_tunnel_port.sql` en el repo de gyrosfe): `cbb01` = 8080 (el
+     puerto de siempre), `scz01` = 8081. `api/consulta_saldo.php` y `api/debitar.php` en
+     gyrosfe ya NO tienen `127.0.0.1:8080` hardcodeado — resuelven el puerto en runtime
+     vía `UsbDeviceState` (serial del dispositivo → agente conectado ahora mismo → su
+     `tunnelPort`). Esto significa que **el dispositivo que en este momento tenga
+     `status='connected'` bajo un agente es el que efectivamente atiende esa cuenta** —
+     si el mismo teléfono se pasa físicamente de `cbb01` a `scz01` (o viceversa), el
+     ruteo lo sigue automáticamente en cuanto `detecta.pl` reporta el evento USB, sin
+     tocar nada más.
+   - **`systemd/gyros-tunnel-cleanup.sh` cambió de comportamiento**: la versión vieja
+     mataba *cualquier* sesión huérfana `sshd-session: marco` sin tty en flamenco — con
+     dos agentes tuneleando a la vez eso podía matar el túnel sano del otro agente. Se
+     intentó identificar la sesión por el puerto real (`ss -ltnp` en flamenco), pero
+     **no es posible en ese host**: `ss -ltnp` no expone el PID dueño del socket para un
+     usuario sin privilegios, y `lsof -p <pid>` da "Permission denied" incluso sobre el
+     propio proceso (mismo privilege separation de sshd del hallazgo #1) — una sesión
+     sana y una huérfana de OTRO agente se ven idénticas desde `marco`, sin ninguna señal
+     para distinguirlas. Mitigación aceptada (no es un fix perfecto): el script ahora
+     solo mata si hay **exactamente una** sesión huérfana candidata en ese momento; si
+     hay 2+ (ambigüedad real), no toca nada y confía en `Restart=always` + timeout de TCP
+     del SO. Si en el futuro se necesita un fix real, la única vía sería pedirle a quien
+     administra flamenco (no es `marco`, que no tiene sudo ahí) que exponga esa info, o
+     mover el túnel a un mecanismo que no dependa de matar procesos por nombre.
+   - Nuevo agente `scz01` (Santa Cruz): mismo repo, clon independiente en
+     `/opt/gyros/agent` de esa máquina, con su propio `.env` (mismo `BU_OFICINA_*` que
+     `cbb01` — es la misma cuenta oficina real, no una propia), su propia llave de túnel
+     (`id_ed25519_flamenco`, distinta de la de `cbb01`), venv de Python (Ubuntu 26.04 /
+     Python 3.14 exige venv por PEP 668, `cbb01` no lo necesitaba por ser Ubuntu 22.04).
+   - **Pendiente**: decidir cuándo pushear `nuevo_agente` a
+     `origin/nuevo_agente-cbb01` / fusionar a `main`/`develop`, una vez validado en
+     producción real (ver checklist de verificación en el plan de esta migración).
 
 ## Checklist para iteraciones de `/loop` sobre este agente
 

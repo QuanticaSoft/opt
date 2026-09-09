@@ -1,9 +1,19 @@
-# Gyros Agent
+# Gyros Agent — cbb01 (Cochabamba)
 
 Agente de automatización RPA que corre en el host `agent-01` (Ubuntu 22.04, IP Tailscale
 `100.107.84.95`). Controla un teléfono Android conectado por USB para automatizar la app
 oficial **UNImóvil Plus** del Banco Unión (Bolivia) vía `uiautomator2`/ADB — no usa ninguna
 API bancaria, interactúa con la UI real de la app.
+
+**Desde 2026-09-09 este agente se identifica como `cbb01`** (`AGENT_ID` en
+`config.conf`/`heartbeat.pl`/`detecta.pl` y en la tabla `Agent` de la DB) — el hostname del
+sistema operativo sigue siendo `agent-01`. Corre **en paralelo** con un segundo agente,
+`scz01` (Santa Cruz), cada uno con su propio teléfono y su propio puerto de túnel
+(`Agent.tunnelPort`: `cbb01`=8080, `scz01`=8081) — `api/consulta_saldo.php`/`debitar.php`
+en gyrosfe ya no asumen un solo agente, resuelven el puerto dinámicamente según qué agente
+tiene conectado el dispositivo del cliente en ese momento. Detalle completo del cambio,
+incluida una limitación real descubierta (no se puede identificar por puerto qué sesión SSH
+huérfana matar en flamenco por permisos del host), en `memory.md`, hallazgo #8.
 
 Repo: `git@github.com:QuanticaSoft/opt.git`, rama `develop`.
 
