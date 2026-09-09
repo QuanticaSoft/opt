@@ -1,17 +1,17 @@
 [Unit]
-Description=Gyros Union HTTP Server (saldo/debito) - scz01
-After=network-online.target
-Wants=network-online.target
+Description=Gyros USB Monitor Service (scz01)
+After=network.target
 
 [Service]
 Type=simple
-User=agentescz1
+User=root
 WorkingDirectory=/opt/gyros/agent
-ExecStart=/usr/bin/python3 -m union.server
+ExecStart=/usr/bin/perl /opt/gyros/agent/usb-monitor.pl
 Restart=always
 RestartSec=5
 StandardOutput=journal
 StandardError=journal
+SyslogIdentifier=gyros-usb-monitor
 
 [Install]
 WantedBy=multi-user.target
