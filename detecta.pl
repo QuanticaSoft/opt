@@ -15,7 +15,7 @@ use Fcntl qw(F_GETFL F_SETFL O_NONBLOCK);
 # CONFIG
 # =========================
 my $API_URL     = 'https://www.quanticasoft.com/gyrosfe/agent/usb_event.php';
-my $AGENT_ID    = 'agent-01';
+my $AGENT_ID    = 'cbb01';
 my $AGENT_TOKEN = 'TOKEN_SECRETO';
 
 # re-enumeración (MTP / cambiar modo USB)

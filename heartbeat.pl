@@ -10,7 +10,7 @@ use Time::HiRes qw(sleep);
 
 # Configuración (AJUSTA AQUÍ)
 my $HEARTBEAT_URL = 'https://www.quanticasoft.com/gyrosfe/agent/heartbeat.php';
-my $AGENT_ID      = 'agent-01';
+my $AGENT_ID      = 'cbb01';
 my $AGENT_TOKEN   = 'TOKEN_SECRETO';
 my $VERSION       = '1.0.0';
 my $INTERVAL       = 60;   # segundos entre cada heartbeat
