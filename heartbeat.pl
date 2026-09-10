@@ -8,10 +8,27 @@ use HTTP::Request;
 use JSON qw(encode_json);
 use Time::HiRes qw(sleep);
 
+sub read_kv_file {
+    my ($path) = @_;
+    my %kv;
+    open my $fh, "<", $path
+        or die "No puedo abrir $path";
+    while (<$fh>) {
+        chomp;
+        next if /^#/ || /^\s*$/;
+        my ($k, $v) = split /=/, $_, 2;
+        $kv{$k} = $v;
+    }
+    close $fh;
+    return %kv;
+}
+
+my %env = read_kv_file("/opt/gyros/agent/.env");
+
 # Configuración (AJUSTA AQUÍ)
 my $HEARTBEAT_URL = 'https://www.quanticasoft.com/gyrosfe/agent/heartbeat.php';
-my $AGENT_ID      = 'scz01';
-my $AGENT_TOKEN   = '93236c8728e6d05072b2cd12c4e6647843e5e068ad5a5530d4262add6edee0d9';
+my $AGENT_ID      = $env{AGENT_ID}    or die "Falta AGENT_ID en .env";
+my $AGENT_TOKEN   = $env{AGENT_TOKEN} or die "Falta AGENT_TOKEN en .env";
 my $VERSION       = '1.0.0';
 my $INTERVAL       = 60;   # segundos entre cada heartbeat
 my $MAX_RETRIES    = 5;

@@ -4,23 +4,25 @@ use warnings;
 use IO::Socket::INET;
 use POSIX qw(strftime);
 
-sub read_config {
-    my %cfg;
-    open my $fh, "<", "/opt/gyros/agent/config.conf"
-        or die "No puedo abrir config.conf";
+sub read_kv_file {
+    my ($path) = @_;
+    my %kv;
+    open my $fh, "<", $path
+        or die "No puedo abrir $path";
     while (<$fh>) {
         chomp;
         next if /^#/ || /^\s*$/;
         my ($k, $v) = split /=/, $_, 2;
-        $cfg{$k} = $v;
+        $kv{$k} = $v;
     }
     close $fh;
-    return %cfg;
+    return %kv;
 }
 
-my %cfg = read_config();
+my %cfg = read_kv_file("/opt/gyros/agent/config.conf");
+my %env = read_kv_file("/opt/gyros/agent/.env");
 
-my $AGENT_ID     = $cfg{AGENT_ID};
+my $AGENT_ID     = $env{AGENT_ID} or die "Falta AGENT_ID en .env";
 my $BACKEND_HOST = $cfg{BACKEND_HOST};
 my $BACKEND_PORT = $cfg{BACKEND_PORT};
 
