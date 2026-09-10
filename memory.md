@@ -1,43 +1,40 @@
 # Gyros Agent — memoria del proyecto
 
-> Host: `agent-01` (Ubuntu 22.04, kernel 5.15) — Tailscale IP `100.107.84.95`, usuario `robot`.
-> Ruta: `/opt/gyros/agent`. Repo git: `origin git@github.com:QuanticaSoft/opt.git`, rama `develop`.
-> **Desde 2026-09-09 este agente se identifica como `cbb01` (Cochabamba)** en `AGENT_ID`
-> (`config.conf`, `heartbeat.pl`, `detecta.pl`) y en la tabla `Agent` de la DB — el hostname
-> del sistema operativo sigue siendo `agent-01`, solo cambió el identificador lógico. Ver
-> hallazgo #8: ahora hay un segundo agente en paralelo (`scz01`, Santa Cruz).
-> Este archivo existe para dar contexto persistente a sesiones de `/loop` (u otras sesiones
-> nuevas) que no arrancan con el historial de esta conversación. Mantenerlo actualizado tras
+> Este repo corre en más de un host en paralelo — ver la tabla de hosts en `CLAUDE.md`
+> (hoy: `agent-01`/`cbb01` en Cochabamba, `scz01` en Santa Cruz). Esta bitácora es
+> **compartida entre hosts**: las entradas indican a cuál se refieren cuando aplica; los
+> hallazgos sobre el diseño (túnel, DB, etc.) valen para todos. Mantenerla actualizada tras
 > cada hallazgo relevante — es más barato leer esto que re-explorar todo el proyecto.
 
 ## Qué hace este agente
 
-Gyros Agent corre en una máquina física con un teléfono Android conectado por USB
-(Alcatel/ZTE, ver `systemd/51-android.rules`). Automatiza la app **UNImóvil Plus** del
-Banco Unión (Bolivia) vía `uiautomator2` para:
+Controla un teléfono Android físico conectado por USB (Alcatel/ZTE, ver
+`systemd/51-android.rules`). Automatiza la app **UNImóvil Plus** del Banco Unión
+(Bolivia) vía `uiautomator2` para:
 
 1. Consultar saldo de una cuenta (`union/main.py`, `POST /consultar-saldo`).
 2. Debitar esa cuenta hacia una "cuenta oficina" fija por transferencia ACH
    (`POST /debitar`), usado por el flujo `debitar` del sistema de gestión financiera-logística.
 
-El resultado se expone vía HTTP (Flask, puerto 8080) y se tuneliza por SSH inverso hacia
-`flamenco.cnb.net` para que el backend central pueda invocarlo.
+El resultado se expone vía HTTP (Flask, puerto 8080 local) y se tuneliza por SSH inverso
+hacia `flamenco.cnb.net` (puerto remoto propio de cada host, ver `CLAUDE.md`) para que el
+backend central pueda invocarlo.
 
 ## Inventario de servicios (systemd)
 
 | Unit | Script | Rol | Usuario | Estado |
 |---|---|---|---|---|
-| `gyros-agent.service` | `gyros-agent.pl` | Proceso supervisor: hace `fork()+exec` de `heartbeat.pl` y `detecta.pl` (única copia de cada uno desde 2026-07-13), loguea "alive" cada 60s | root | activo |
-| `gyros-heartbeat.service` | `heartbeat.pl` | Heartbeat HTTP redundante a `quanticasoft.com/gyrosfe/agent/heartbeat.php` | root | **deshabilitado 2026-07-13** (ver hallazgo #2) |
-| `usb-agent.service` ⚠️ sin prefijo `gyros-` | `detecta.pl` | Detección USB redundante (+ `udevadm monitor` propio) | root | **deshabilitado 2026-07-13** (ver hallazgo #2) |
-| `gyros-usb-monitor.service` | `usb-monitor.pl` | Escucha `udevadm monitor`, envía eventos USB por socket TCP crudo a `BACKEND_HOST:BACKEND_PORT` (`config.conf` → `flamenco.cnb.net:4000`) | root | activo |
-| `gyros-union-server.service` | `python3 -m union.server` | Servidor Flask (saldo/débito), puerto 8080 local | robot | activo |
-| `gyros-tunnel.service` | `ssh` directo (`Restart=always`, ya no `autossh`, ver hallazgo #1) | Túnel SSH inverso `agent-01 → flamenco.cnb.net`, expone el puerto 8080 local en `127.0.0.1:8080` de flamenco | robot | activo |
+| `gyros-agent.service` | `gyros-agent.pl` | Proceso supervisor: hace `fork()+exec` de `heartbeat.pl` y `detecta.pl`, loguea "alive" cada 60s | root | activo |
+| `gyros-heartbeat.service` (en `cbb01`) | `heartbeat.pl` | Heartbeat HTTP redundante | root | **deshabilitado 2026-07-13** (hallazgo #2) |
+| `usb-agent.service` (en `cbb01`) ⚠️ sin prefijo `gyros-` | `detecta.pl` | Detección USB redundante | root | **deshabilitado 2026-07-13** (hallazgo #2) |
+| `gyros-usb-monitor.service` | `usb-monitor.pl` | Escucha `udevadm monitor`, envía eventos USB por socket TCP crudo a `BACKEND_HOST:BACKEND_PORT` (`config.conf`) | root | activo |
+| `gyros-union-server.service` | `${PYTHON_BIN} -m union.server` | Servidor Flask (saldo/débito), puerto 8080 local | *(host, ver `.env`)* | activo |
+| `gyros-tunnel.service` | `ssh` directo (`Restart=always`) | Túnel SSH inverso hacia flamenco, puerto remoto propio de `.env` | *(host, ver `.env`)* | activo |
 
 Comando rápido de salud:
 ```
 systemctl status gyros-agent gyros-usb-monitor gyros-union-server gyros-tunnel --no-pager
-systemctl status gyros-heartbeat usb-agent --no-pager   # deben mostrar inactive/disabled
+systemctl status gyros-heartbeat usb-agent --no-pager   # solo en cbb01, deben mostrar inactive/disabled
 ```
 
 ## Flujo funcional (`union/steps.py`, `union/steps_transferencia.py`)
@@ -53,28 +50,30 @@ diagnosticar en qué punto de la UI se atoró la automatización.
 
 ## Conectividad externa
 
-- `flamenco.cnb.net:22` — SSH, usado por el túnel inverso (`id_ed25519_flamenco`) y por
-  `usb-monitor.pl` (socket TCP a puerto 4000, no HTTP).
+- `flamenco.cnb.net:22` — SSH, usado por el túnel inverso (llave de `TUNNEL_SSH_KEY` en
+  `.env`) y por `usb-monitor.pl` (socket TCP a puerto 4000, no HTTP).
 - `quanticasoft.com/gyrosfe/agent/{heartbeat,usb_event}.php` — API HTTP usada por
-  `heartbeat.pl` y `detecta.pl`, autenticada con headers `x-agent-id` / `x-agent-token`.
+  `heartbeat.pl` y `detecta.pl`, autenticada con headers `x-agent-id` / `x-agent-token`
+  (de `.env`).
 
 ## Secretos (no volcar valores en este archivo ni en el repo)
 
-- `.env` (gitignored): `BU_USUARIO`, `BU_PASSWORD`, `BU_DISPOSITIVO`, `BU_NOMBRE_TITULAR`,
-  `BU_OFICINA_ALIAS`, `BU_OFICINA_CUENTA`, `BU_OFICINA_BANCO`, `BU_OFICINA_MONEDA`.
-- `/home/robot/.ssh/id_ed25519_flamenco` — llave del túnel inverso.
-- `AGENT_TOKEN` hardcodeado en `heartbeat.pl` y `detecta.pl` (ver hallazgo #3).
+- `.env` (gitignored, ver tabla completa en `CLAUDE.md`): `AGENT_ID`, `AGENT_TOKEN`,
+  `TUNNEL_SSH_KEY`, `TUNNEL_REMOTE_PORT`, `PYTHON_BIN`, `BU_USUARIO`, `BU_PASSWORD`,
+  `BU_DISPOSITIVO`, `BU_NOMBRE_TITULAR`, `BU_OFICINA_ALIAS`, `BU_OFICINA_CUENTA`,
+  `BU_OFICINA_BANCO`, `BU_OFICINA_MONEDA`.
+- La ruta de `TUNNEL_SSH_KEY` (una llave por host, nunca compartida entre hosts).
 
 ## Hallazgos
 
-1. **[RESUELTO 2026-07-13] Túnel se queda colgado tras un corte de red.**
+1. **[RESUELTO 2026-07-13, cbb01] Túnel se queda colgado tras un corte de red.**
    Causa raíz confirmada: `flamenco.cnb.net` **no se cae** (826 días de uptime sin reboot).
-   Lo que pasa es un corte de red transitorio entre el cliente (`agent-01` o cualquier
-   origen) y flamenco; `autossh` detecta la conexión muerta vía `ServerAliveInterval` y
-   reconecta del lado del agente, pero la sesión SSH vieja del lado de **flamenco** queda
-   huérfana reteniendo el bind de `127.0.0.1:8080` (nadie le avisó que el cliente se fue).
-   Los reintentos posteriores fallan con `remote port forwarding failed for listen port 8080`
-   hasta que esa sesión muere o se mata a mano.
+   Lo que pasa es un corte de red transitorio entre el cliente y flamenco; `autossh`
+   detecta la conexión muerta vía `ServerAliveInterval` y reconecta del lado del agente,
+   pero la sesión SSH vieja del lado de **flamenco** queda huérfana reteniendo el bind del
+   puerto (nadie le avisó que el cliente se fue). Los reintentos posteriores fallan con
+   `remote port forwarding failed for listen port <puerto>` hasta que esa sesión muere o
+   se mata a mano.
 
    Diagnóstico: en flamenco, `sshd` reescribe el título del proceso por privilege
    separation, así que no se puede distinguir la sesión del túnel por su comando. La única
@@ -82,62 +81,59 @@ diagnosticar en qué punto de la UI se atoró la automatización.
    aparece como `sshd-session: marco` con TTY `?`; una sesión interactiva real tendría una
    pty (`pts/N`); una ejecución de comando puntual aparece como `sshd-session: marco@notty`.
 
-   Fix aplicado: `systemd/gyros-tunnel-cleanup.sh` ahora mata exactamente esa sesión
-   (título exacto + tty `?`) en vez del patrón viejo `sshd.*notty`, que nunca coincidía con
-   nada real (commit `ad745b3`, pusheado a `origin/develop`).
+   Fix aplicado: `systemd/gyros-tunnel-cleanup.sh` mata exactamente esa sesión (título
+   exacto + tty `?`) en vez del patrón viejo `sshd.*notty`, que nunca coincidía con nada
+   real (commit `ad745b3`).
 
    **Fix estructural aplicado (2026-07-13, commit `4eebddf`)**: `gyros-tunnel.service`
    reemplazó `autossh` por `ssh` directo bajo `Restart=always` (+ `StartLimitIntervalSec=0`
-   para que systemd nunca se rinda, igual que hacía `autossh`). `autossh` corría con
-   `-M 0` (su propio monitor-port deshabilitado), así que solo aportaba "reiniciar ssh si
-   muere" — algo que systemd ya hacía solo. El problema real era que `ExecStartPre`
-   (la limpieza) solo se disparaba al (re)iniciar el *unit* completo, nunca cuando
-   `autossh` reconectaba internamente (su proceso padre nunca moría). Con `ssh` directo,
-   cualquier caída del proceso hace que systemd reinicie el unit completo y vuelva a
-   correr `ExecStartPre` en cada intento — **verificado matando el proceso ssh a la
-   fuerza** (`kill -9`): systemd detectó la caída, corrió el cleanup, y reconectó solo en
-   ~15s sin intervención manual. Ya no debería requerir un restart manual ante un corte de
-   red futuro.
+   para que systemd nunca se rinda, igual que hacía `autossh`). El problema real era que
+   `ExecStartPre` (la limpieza) solo se disparaba al (re)iniciar el *unit* completo, nunca
+   cuando `autossh` reconectaba internamente (su proceso padre nunca moría). Con `ssh`
+   directo, cualquier caída del proceso hace que systemd reinicie el unit completo y
+   vuelva a correr `ExecStartPre` en cada intento — **verificado matando el proceso ssh a
+   la fuerza** (`kill -9`): systemd detectó la caída, corrió el cleanup, y reconectó solo
+   en ~15s sin intervención manual.
 
    Alternativa de raíz descartada por ahora: `ClientAliveInterval`/`ClientAliveCountMax`
    en el `sshd_config` de flamenco resolvería esto del lado servidor sin importar el
-   cliente. No se aplicó porque **`marco` no tiene sudo en flamenco** (confirmado:
-   "marco is not in the sudoers file. This incident has been reported to the
-   administrator." — no reintentar sudo ahí sin credenciales de un usuario que sí sea
-   sudoer, para no seguir generando alertas de seguridad).
+   cliente. No se aplicó porque **`marco` no tiene sudo en flamenco** (confirmado: "marco
+   is not in the sudoers file. This incident has been reported to the administrator." —
+   no reintentar sudo ahí sin credenciales de un usuario que sí sea sudoer, para no seguir
+   generando alertas de seguridad).
 
-   Chequeo rápido: `journalctl -u gyros-tunnel -n 30 --no-pager`. Si reaparece
-   "remote port forwarding failed", correr `systemctl restart gyros-tunnel` (pide sudo).
+   Chequeo rápido: `journalctl -u gyros-tunnel -n 30 --no-pager`. Si reaparece "remote
+   port forwarding failed", correr `systemctl restart gyros-tunnel` (pide sudo).
 
-2. **[RESUELTO 2026-07-13] Procesos duplicados**: `heartbeat.pl` y `detecta.pl` corrían
-   dos veces cada uno por **4 unidades systemd independientes y solapadas**, ninguna
-   trackeada en `systemd/` del repo (alguien las desplegó a mano directo en
+2. **[RESUELTO 2026-07-13, cbb01] Procesos duplicados**: `heartbeat.pl` y `detecta.pl`
+   corrían dos veces cada uno por **4 unidades systemd independientes y solapadas**,
+   ninguna trackeada en `systemd/` del repo (alguien las desplegó a mano directo en
    `/etc/systemd/system/`, por fuera de git). No eran huérfanos de un restart (hipótesis
-   anterior, descartada): los procesos arrancaban todos en el boot del sistema.
+   descartada): los procesos arrancaban todos en el boot del sistema.
 
    | Unit | Qué corre | Estado (2026-07-13) |
    |---|---|---|
    | `gyros-agent.service` | `gyros-agent.pl` → hace `fork()` de `heartbeat.pl` y `detecta.pl` | activo (es la copia que se conserva de ambos) |
-   | `gyros-heartbeat.service` | `heartbeat.pl` directo | **deshabilitado y detenido** (`systemctl stop` + `disable`, 2026-07-13) |
-   | `usb-agent.service` ⚠️ sin prefijo `gyros-` | `detecta.pl` directo (+ su propio `udevadm monitor` hijo) | **deshabilitado y detenido** (`systemctl stop` + `disable`, 2026-07-13) |
+   | `gyros-heartbeat.service` | `heartbeat.pl` directo | **deshabilitado y detenido** |
+   | `usb-agent.service` ⚠️ sin prefijo `gyros-` | `detecta.pl` directo (+ su propio `udevadm monitor` hijo) | **deshabilitado y detenido** |
    | `gyros-usb-monitor.service` | `usb-monitor.pl` (script y backend distintos, no es el duplicado) | activo, sin cambios |
 
    Ahora `heartbeat.pl` y `detecta.pl` corren una sola vez cada uno, ambos como hijos de
-   `gyros-agent.pl` (PID 777) — duplicación de heartbeats y eventos USB al backend
-   resuelta por completo.
-
-   Nota: ambas unidades se detuvieron/deshabilitaron (`systemctl disable` quitó el
-   symlink en `multi-user.target.wants`), los archivos unit siguen en
-   `/etc/systemd/system/{gyros-heartbeat,usb-agent}.service` por si hace falta revertir.
-   No se eliminaron.
+   `gyros-agent.pl`. Nota: ambas unidades duplicadas se detuvieron/deshabilitaron pero los
+   archivos unit siguen en `/etc/systemd/system/` por si hace falta revertir, no se
+   eliminaron.
 
    Chequeo: `systemctl status usb-agent gyros-heartbeat` debe mostrar
    `inactive`/`disabled` en ambas; `ps -o pid,ppid,cmd -e | grep -E "detecta.pl|heartbeat.pl"`
-   debe mostrar exactamente 2 procesos (uno de cada uno, ambos con PPID 777) en vez de los
-   4 originales.
-3. **Token de agente sin configurar**: `AGENT_TOKEN = 'TOKEN_SECRETO'` en ambos scripts
-   Perl parece un placeholder nunca reemplazado por un valor real. Verificar con el backend
-   si de verdad valida este header o si el agente está efectivamente sin autenticar.
+   debe mostrar exactamente 2 procesos por host.
+
+3. **[RESUELTO 2026-09-10] Token de agente placeholder**: `AGENT_TOKEN = 'TOKEN_SECRETO'`
+   en `cbb01` era literalmente ese placeholder, nunca reemplazado — y la DB lo validaba
+   igual (`hash_equals` contra el mismo string). Se generó un token real
+   (`openssl rand -hex 32`) y se actualizó coordinado en `.env` de `cbb01` y en la fila
+   `Agent` de la DB. Ver hallazgo #9 para el contexto completo (movió además
+   `AGENT_ID`/`AGENT_TOKEN` de código hardcodeado a `.env`).
+
 4. **Dos mecanismos de reporte USB redundantes**: `detecta.pl` (POST a
    `quanticasoft.com/.../usb_event.php`) y `usb-monitor.pl` (socket TCP crudo a
    `flamenco.cnb.net:4000`). No está claro cuál es el vigente/autoritativo — revisar con el
@@ -146,73 +142,122 @@ diagnosticar en qué punto de la UI se atoró la automatización.
    arquitectura de pasos), no lo importa ningún servicio systemd ni `union/*`. Solo
    `setup.py` lo referencia. Candidato a eliminar, pero no borrar sin confirmar con el
    usuario.
-6. Repo remoto estaba 2 commits adelante de `origin/develop` sin pushear al momento de esta
-   revisión (`29a2db3` es el HEAD local).
-7. Backups sueltos en la raíz (`detecta.pl.bak.*`) — ya cubiertos por `.gitignore`
+6. Backups sueltos en la raíz (`detecta.pl.bak.*`) — ya cubiertos por `.gitignore`
    (`*.bak*`), no se trackean, pero conviene limpiarlos del filesystem.
 
-8. **[2026-09-09] Rename a `cbb01` + segundo agente en paralelo (`scz01`, Santa Cruz)**.
-   Se necesitaba un segundo agente de producción en otra ciudad, corriendo al mismo tiempo
-   que este (no en reemplazo). Cambios hechos, todos sobre la rama `nuevo_agente` (no
-   `main`, para poder volver atrás limpio):
+7. **[2026-09-09] Rename `agent-01`→`cbb01` (Cochabamba) + nuevo agente `scz01` (Santa
+   Cruz), en paralelo**. Se necesitaba un segundo agente de producción en otra ciudad,
+   corriendo al mismo tiempo que `cbb01` (no en reemplazo). Trabajo hecho sobre una rama
+   `nuevo_agente` en cada clon (no directo a `main`), para poder volver atrás limpio:
 
-   - `AGENT_ID` pasó de `agent-01` a `cbb01` en `config.conf`, `heartbeat.pl`, `detecta.pl`
-     (mismo `AGENT_TOKEN`, sin cambiar) y en la fila de la tabla `Agent` en la DB de
-     gyrosfe. Reinicio de `gyros-agent`/`gyros-usb-monitor` coordinado con el UPDATE de la
-     DB para minimizar la ventana de heartbeats fallando por `agentId` desconocido.
+   - `AGENT_ID` pasó de `agent-01` a `cbb01` en `config.conf`/`heartbeat.pl`/`detecta.pl`
+     (en ese momento aún hardcodeado, ver hallazgo #9) y en la fila `Agent` de la DB.
+     Reinicio de `gyros-agent`/`gyros-usb-monitor` coordinado con el `UPDATE` de la DB
+     para minimizar la ventana de heartbeats fallando por `agentId` desconocido.
    - Nueva columna `"Agent"."tunnelPort"` (migración
-     `migrations/2026_agent_tunnel_port.sql` en el repo de gyrosfe): `cbb01` = 8080 (el
-     puerto de siempre), `scz01` = 8081. `api/consulta_saldo.php` y `api/debitar.php` en
-     gyrosfe ya NO tienen `127.0.0.1:8080` hardcodeado — resuelven el puerto en runtime
-     vía `UsbDeviceState` (serial del dispositivo → agente conectado ahora mismo → su
-     `tunnelPort`). Esto significa que **el dispositivo que en este momento tenga
-     `status='connected'` bajo un agente es el que efectivamente atiende esa cuenta** —
-     si el mismo teléfono se pasa físicamente de `cbb01` a `scz01` (o viceversa), el
-     ruteo lo sigue automáticamente en cuanto `detecta.pl` reporta el evento USB, sin
-     tocar nada más.
-   - **`systemd/gyros-tunnel-cleanup.sh` cambió de comportamiento**: la versión vieja
-     mataba *cualquier* sesión huérfana `sshd-session: marco` sin tty en flamenco — con
-     dos agentes tuneleando a la vez eso podía matar el túnel sano del otro agente. Se
-     intentó identificar la sesión por el puerto real (`ss -ltnp` en flamenco), pero
-     **no es posible en ese host**: `ss -ltnp` no expone el PID dueño del socket para un
-     usuario sin privilegios, y `lsof -p <pid>` da "Permission denied" incluso sobre el
-     propio proceso (mismo privilege separation de sshd del hallazgo #1) — una sesión
-     sana y una huérfana de OTRO agente se ven idénticas desde `marco`, sin ninguna señal
-     para distinguirlas. Mitigación aceptada (no es un fix perfecto): el script ahora
-     solo mata si hay **exactamente una** sesión huérfana candidata en ese momento; si
-     hay 2+ (ambigüedad real), no toca nada y confía en `Restart=always` + timeout de TCP
-     del SO. Si en el futuro se necesita un fix real, la única vía sería pedirle a quien
-     administra flamenco (no es `marco`, que no tiene sudo ahí) que exponga esa info, o
-     mover el túnel a un mecanismo que no dependa de matar procesos por nombre.
-   - Nuevo agente `scz01` (Santa Cruz): mismo repo, clon independiente en
-     `/opt/gyros/agent` de esa máquina, con su propio `.env` (mismo `BU_OFICINA_*` que
-     `cbb01` — es la misma cuenta oficina real, no una propia), su propia llave de túnel
-     (`id_ed25519_flamenco`, distinta de la de `cbb01`), venv de Python (Ubuntu 26.04 /
-     Python 3.14 exige venv por PEP 668, `cbb01` no lo necesitaba por ser Ubuntu 22.04).
-   - **Pendiente**: decidir cuándo pushear `nuevo_agente` a
-     `origin/nuevo_agente-cbb01` / fusionar a `main`/`develop`, una vez validado en
-     producción real (ver checklist de verificación en el plan de esta migración).
+     `migrations/2026_agent_tunnel_port.sql` en el repo de gyrosfe): `cbb01`=8080 (el de
+     siempre), `scz01`=8081. `api/consulta_saldo.php`/`debitar.php` en gyrosfe ya no
+     tienen el puerto hardcodeado — lo resuelven en runtime vía `UsbDeviceState` (serial
+     del dispositivo → agente conectado ahora mismo → su `tunnelPort`). El dispositivo que
+     en ese momento tenga `status='connected'` bajo un agente es el que efectivamente
+     atiende esa cuenta: si el mismo teléfono se pasa físicamente de un host a otro, el
+     ruteo lo sigue automáticamente en cuanto `detecta.pl` reporta el evento USB.
+   - **`systemd/gyros-tunnel-cleanup.sh`**: la versión de un solo agente mataba
+     *cualquier* sesión huérfana `sshd-session: marco` sin tty en flamenco — con varios
+     agentes tuneleando a la vez eso podía matar el túnel sano de otro. Se intentó
+     identificar la sesión por el puerto real (`ss -ltnp` en flamenco) — **no es posible
+     en ese host**: `ss -ltnp` no expone el PID dueño del socket para un usuario sin
+     privilegios, y `lsof -p <pid>` da "Permission denied" incluso sobre el propio proceso
+     (mismo privilege separation de sshd del hallazgo #1) — una sesión sana y una huérfana
+     de OTRO agente se ven idénticas desde `marco`, sin ninguna señal para distinguirlas.
+     Confirmado en vivo probando contra el túnel real de `cbb01` (`ss -ltnp` sin columna
+     Process, `lsof -p` con "Permission denied" en los 4 fds). Mitigación aceptada (no es
+     un fix perfecto): el script solo mata si hay **exactamente una** sesión huérfana
+     candidata en ese momento; con 2+ (ambigüedad real) no toca nada y confía en
+     `Restart=always` + timeout de TCP del SO.
+   - Setup de `scz01` (host nuevo, Ubuntu 26.04): llave de gestión propia
+     (`~/.ssh/id_ed25519_gyros`) para inventariar/aplicar cambios en `cbb01`/flamenco
+     durante el setup; llave separada para el túnel (`~/.ssh/id_ed25519_flamenco`, propia,
+     nunca compartida); deploy key de GitHub propia y separada
+     (`~/.ssh/id_ed25519_opt_deploy`, lectura+escritura) — tres llaves con propósitos
+     distintos, no reusar una para otra cosa. `/opt/gyros` no existía, requirió `sudo
+     mkdir`+`chown` (este host no tiene sudo sin password). Python 3.14/Ubuntu 26.04 exige
+     venv (PEP 668) — `python3 -m venv .venv` falló la primera vez ("ensurepip is not
+     available") hasta instalar el paquete específico `python3.14-venv` (no alcanza
+     `python3-venv` genérico). `heartbeat.pl`/`detecta.pl` fallaban con "Can't locate
+     LWP/UserAgent.pm"/"Can't locate JSON.pm" — Ubuntu 26.04 no trae esos módulos Perl por
+     defecto, resuelto con `apt install libwww-perl libjson-perl`.
+   - Teléfono real: un ZTE Blade A34 (serial `NBA34BOAC5036471`, vendor `19d2`, ya cubierto
+     por las reglas udev existentes) fue movido físicamente por el usuario desde `cbb01` a
+     `scz01` para esta prueba (confirmado por el usuario, no es la reubicación real a
+     Santa Cruz todavía). Ya tenía la app UNImóvil Plus instalada. Autorización ADB y
+     `python -m uiautomator2 init <serial>` sin problemas. Ya existía un cliente real
+     (`Cliente.uuid = a9c0d300-...`) apuntando a este serial, así que en cuanto el evento
+     USB se reportó `connected` bajo `scz01`, ese cliente pasó a rutearse ahí
+     automáticamente.
+   - **[VALIDADO 2026-09-09]** Consulta de saldo real desde el dashboard para ese cliente
+     devolvió 13.79 Bs correctamente, confirmando el ruteo dinámico end-to-end en
+     producción real.
 
-## Checklist para iteraciones de `/loop` sobre este agente
+8. **[2026-09-10] `AGENT_ID`/`AGENT_TOKEN`/puerto-de-túnel/llave/python-bin: de código
+   hardcodeado a `.env`, y merge de `scz01` a `main`**. El hallazgo #7 dejó
+   `AGENT_ID`/`AGENT_TOKEN` hardcodeados en `heartbeat.pl`/`detecta.pl` y `config.conf`,
+   distintos por host — eso hacía que un merge real entre las ramas de `cbb01` y `scz01`
+   chocara exactamente en esas líneas (ambos valores correctos, cada uno para su máquina,
+   sin nada que "resolver"). Se movieron a `.env`:
+   - `heartbeat.pl`/`detecta.pl`/`usb-monitor.pl`: ya no tienen `$AGENT_ID`/`$AGENT_TOKEN`
+     como constantes — los leen de `.env` con una función `read_kv_file` (mismo patrón que
+     ya usaba `usb-monitor.pl` para `config.conf`, generalizado). `config.conf` perdió la
+     línea `AGENT_ID` (quedó solo con `BACKEND_HOST`/`PORT`/`HEARTBEAT_INTERVAL`, iguales
+     en todos los hosts).
+   - De paso, se resolvió el hallazgo #3: token real generado para `cbb01`, coordinado con
+     un `UPDATE` en la DB.
+   - `systemd/gyros-tunnel.service`, `gyros-union-server.service`,
+     `gyros-tunnel-cleanup.sh`: mismo tratamiento para `TUNNEL_SSH_KEY`,
+     `TUNNEL_REMOTE_PORT`, `PYTHON_BIN` — vía `EnvironmentFile=/opt/gyros/agent/.env` en
+     las unidades systemd, y lectura directa (con fallback a parsear `.env` a mano) en el
+     script bash. **Nota técnica**: systemd expande `${VAR}` en los argumentos de
+     `ExecStart` pero *no* en la posición del ejecutable — `gyros-union-server.service`
+     necesitó `ExecStart=/usr/bin/env ${PYTHON_BIN} ...` como workaround (confirmado con
+     un fallo real, `status=203/EXEC`, antes de aplicar el fix). Única línea que sigue
+     siendo distinta por host: `User=` (systemd no permite leerlo de `EnvironmentFile=`),
+     documentada con un comentario en cada unit.
+   - Con el código ya idéntico entre hosts, se completó el merge de la rama `nuevo_agente`
+     de `scz01` a `main` (junto con la de `cbb01`, ya mergeada antes). Únicos conflictos
+     reales al mergear: `CLAUDE.md`/`memory.md` (docs, esperable que difieran por host —
+     se unificaron en una sola versión compartida con tabla de hosts) y la línea `User=`
+     en los dos `.service` (resuelta a favor de `cbb01` como valor por defecto documentado
+     a editar por host).
+   - Verificado en ambos hosts tras cada cambio: los 4 servicios activos, heartbeat
+     reportando el `agentId` correcto, túnel con el puerto/llave propios expandidos.
 
-1. `git -C /opt/gyros/agent status && git -C /opt/gyros/agent log --oneline -5` — detectar
-   cambios de otra persona antes de tocar nada.
+## Pendiente
+
+- Reubicación física real de `scz01` a Santa Cruz (al momento de escribir esto sigue en el
+  mismo lugar que `cbb01`, para las pruebas). Tailscale ya está conectado y debería
+  reconectar solo con la misma IP tras el traslado.
+- Punto 4 (mecanismos de reporte USB redundantes) sigue sin decidir.
+- `banco_union/` sigue sin borrarse (legado, hallazgo #5).
+- No hay alerta/monitoreo activo si un túnel cae (más allá del auto-heal de
+  `Restart=always` + cleanup) — el servidor de gyrosfe ya corre `zabbix-agent`, candidato
+  natural para un chequeo por host/puerto. No implementado.
+
+## Checklist para iteraciones de `/loop` sobre cualquiera de estos hosts
+
+1. `git status && git log --oneline -5` — detectar cambios de otra persona antes de tocar
+   nada.
 2. `systemctl status gyros-agent gyros-usb-monitor gyros-union-server gyros-tunnel --no-pager`
-   + `systemctl status gyros-heartbeat usb-agent --no-pager` (deben seguir `inactive`/
-   `disabled` — ver hallazgo #2; `usb-agent.service` no tiene prefijo `gyros-`, se escapa
-   fácil de un grep "gyros*")
-3. `journalctl -u gyros-tunnel -n 20 --no-pager` — el servicio ahora es autosanable
-   (hallazgo #1): `ssh` directo + `Restart=always` reejecuta `ExecStartPre` en cada
-   reconexión, así que un `remote port forwarding failed` aislado debería resolverse
-   solo en ~15s sin intervención. Si el patrón se repite en bucle por más de un par de
-   minutos, ahí sí investigar (podría ser flamenco realmente caído, no solo una sesión
-   huérfana).
+   (+ en `cbb01`: `systemctl status gyros-heartbeat usb-agent --no-pager`, deben seguir
+   `inactive`/`disabled` — hallazgo #2; `usb-agent.service` no tiene prefijo `gyros-`, se
+   escapa fácil de un grep "gyros*").
+3. `journalctl -u gyros-tunnel -n 20 --no-pager` — el servicio es autosanable
+   (hallazgo #1): un `remote port forwarding failed` aislado debería resolverse solo en
+   ~15s. Si el patrón se repite en bucle por más de un par de minutos, investigar (podría
+   ser flamenco realmente caído, no solo una sesión huérfana).
 4. `adb devices` — confirmar que el teléfono sigue conectado.
-5. `ps aux | grep -E "heartbeat.pl|detecta.pl"` — se espera ver exactamente 2 procesos,
-   uno de cada uno, ambos con PPID = PID de `gyros-agent.pl` (hallazgo #2, resuelto). Si
-   aparece un segundo `detecta.pl` o `heartbeat.pl`, algo reactivó `usb-agent.service` o
-   `gyros-heartbeat.service` (o hay una fuga nueva) — investigar.
-6. `df -h /` — espacio en disco (98G total, ~76G libres a la fecha de esta revisión).
+5. `ps aux | grep -E "heartbeat.pl|detecta.pl"` — exactamente 2 procesos, ambos con PPID =
+   PID de `gyros-agent.pl` (hallazgo #2).
+6. `df -h /` — espacio en disco.
 7. Reportar solo lo que cambió respecto a la iteración anterior — evitar ruido si el
    estado es idéntico.
 8. No mostrar ni loguear valores de `.env` ni de llaves SSH.
@@ -220,20 +265,18 @@ diagnosticar en qué punto de la UI se atoró la automatización.
 
 ## Notas de conexión
 
-- `robot@100.107.84.95` (agent-01): acceso por llave pública ya autorizado en
-  `~/.ssh/authorized_keys` (2026-07-13) — no hace falta password para entrar.
-- `marco@flamenco.cnb.net`: solo alcanzable con la llave dedicada del túnel
-  (`/home/robot/.ssh/id_ed25519_flamenco`, vive en agent-01, no localmente). Para
-  diagnosticar flamenco desde una sesión nueva, saltar por agent-01:
-  `ssh robot@100.107.84.95 "ssh -i /home/robot/.ssh/id_ed25519_flamenco -o BatchMode=yes marco@flamenco.cnb.net 'comando'"`.
-  Este salto es lento (~15-20s por llamada) — agrupar varios chequeos en un solo comando
-  remoto en vez de hacer llamadas sueltas.
-- **`marco` no tiene sudo en flamenco** (confirmado 2026-07-13: "marco is not in the
-  sudoers file. This incident has been reported to the administrator."). No reintentar
-  sudo ahí sin credenciales de un usuario que sí sea sudoer real — ya generó una alerta de
-  seguridad una vez. Cambios que requieran root en flamenco (p.ej. `sshd_config`) necesitan
-  que el usuario los aplique él mismo o dé acceso a otra cuenta con sudo real.
+- `robot@100.107.84.95` (agent-01/cbb01): acceso por llave pública ya autorizada en
+  `~/.ssh/authorized_keys`.
+- `agentescz1@100.117.246.119` (scz01): idem, llave de gestión propia autorizada tanto ahí
+  como en `cbb01`/flamenco.
+- `marco@flamenco.cnb.net`: alcanzable con la llave dedicada del túnel de cada host
+  (`TUNNEL_SSH_KEY` en `.env`, nunca compartida entre hosts). Para diagnosticar flamenco
+  desde una sesión sin acceso directo, saltar por cualquiera de los dos agentes.
+- **`marco` no tiene sudo en flamenco** (confirmado: "marco is not in the sudoers file.
+  This incident has been reported to the administrator."). No reintentar sudo ahí sin
+  credenciales de un usuario que sí sea sudoer real — ya generó una alerta de seguridad
+  una vez. Cambios que requieran root en flamenco necesitan que el usuario los aplique él
+  mismo o dé acceso a otra cuenta con sudo real.
 - flamenco tiene otros servicios corriendo para `marco` (PM2, VSCode Server, `php-fpm:
-  pool gyros`) — cualquier limpieza de sesiones/procesos ahí debe ser quirúrgica, nunca
-  un pattern-match amplio (ver hallazgo #1 sobre por qué `ps`/título de proceso no alcanza
-  para distinguir sesiones).
+  pool gyros`) — cualquier limpieza de sesiones/procesos ahí debe ser quirúrgica, nunca un
+  pattern-match amplio (hallazgo #1).
