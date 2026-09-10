@@ -14,9 +14,26 @@ use Fcntl qw(F_GETFL F_SETFL O_NONBLOCK);
 # =========================
 # CONFIG
 # =========================
+sub read_kv_file {
+    my ($path) = @_;
+    my %kv;
+    open my $fh, "<", $path
+        or die "No puedo abrir $path";
+    while (<$fh>) {
+        chomp;
+        next if /^#/ || /^\s*$/;
+        my ($k, $v) = split /=/, $_, 2;
+        $kv{$k} = $v;
+    }
+    close $fh;
+    return %kv;
+}
+
+my %env = read_kv_file("/opt/gyros/agent/.env");
+
 my $API_URL     = 'https://www.quanticasoft.com/gyrosfe/agent/usb_event.php';
-my $AGENT_ID    = 'cbb01';
-my $AGENT_TOKEN = 'TOKEN_SECRETO';
+my $AGENT_ID    = $env{AGENT_ID}    or die "Falta AGENT_ID en .env";
+my $AGENT_TOKEN = $env{AGENT_TOKEN} or die "Falta AGENT_TOKEN en .env";
 
 # re-enumeración (MTP / cambiar modo USB)
 my $DISCONNECT_GRACE_SEC      = 15;
