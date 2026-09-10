@@ -90,11 +90,18 @@ adb devices -l
   `cbb01` para esta prueba, según confirmó el usuario). Tailscale ya está conectado y
   debería reconectar solo con la misma IP tras el traslado — no debería requerir
   reconfiguración, pero no se validó un traslado real todavía.
-- Validación end-to-end real (consulta de saldo/débito desde el dashboard de gyrosfe para
-  el cliente ya asignado a este dispositivo) — no disparada automáticamente, es una acción
-  financiera real, queda para que la corra el usuario.
-- Decidir cuándo pushear `nuevo_agente` a `origin/nuevo_agente-scz01` y mergear a
-  `main`/`develop` en el repo remoto.
+- ~~Validación end-to-end real~~ **[HECHO 2026-09-09]**: consulta de saldo real desde el
+  dashboard para el cliente `a9c0d300-...` (dispositivo de este agente) devolvió 13.79 Bs
+  correctamente, registrado en la tabla `saldo` de gyrosfe. Confirma que
+  `consulta_saldo.php` resolvió el puerto 8081 dinámicamente y este agente ejecutó el
+  flujo RPA real contra la app bancaria sin problemas.
+- ~~Decidir cuándo pushear `nuevo_agente`~~ **[HECHO 2026-09-09]**: pusheado como
+  `origin/nuevo_agente-scz01` (rama de referencia, sin mergear a `main`). **No se mergeó
+  a `main`/`develop`** — `main` de `opt.git` sigue representando a `cbb01` (que sí se
+  mergeó y tagueó `v1.1.0`); mergear la rama de `scz01` ahí chocaría en los archivos con
+  `AGENT_ID`/`AGENT_TOKEN` hardcodeado (ver nota en `CLAUDE.md` sobre mover esto a `.env`
+  como fix de raíz, todavía no aplicado). Este repo sigue corriendo desde `nuevo_agente`
+  local, no desde `main`.
 - Igual que en `cbb01`: `banco_union/` es legado, no borrar sin confirmar; no hacer `git
   push` ni reiniciar/detener servicios sin confirmación explícita del usuario; nunca
   volcar valores de `.env` ni de llaves SSH.
