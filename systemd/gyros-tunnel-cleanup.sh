@@ -21,8 +21,17 @@
 # (ambiguedad real - no se puede saber cual es la propia), no se toca nada;
 # se confia en Restart=always para seguir reintentando hasta que el sistema
 # operativo libere el puerto por timeout de TCP o alguien intervenga a mano.
+#
+# TUNNEL_SSH_KEY llega por variable de entorno (systemd la inyecta via
+# EnvironmentFile=/opt/gyros/agent/.env en gyros-tunnel.service, que es quien
+# invoca este script como ExecStartPre). Si se corre este script a mano fuera
+# de systemd, cae al fallback de leerla directo de .env.
 
-ssh -i "/home/robot/.ssh/id_ed25519_flamenco" \
+if [ -z "$TUNNEL_SSH_KEY" ]; then
+    TUNNEL_SSH_KEY=$(grep -m1 '^TUNNEL_SSH_KEY=' /opt/gyros/agent/.env | cut -d= -f2-)
+fi
+
+ssh -i "$TUNNEL_SSH_KEY" \
     -o StrictHostKeyChecking=no \
     -o ConnectTimeout=10 \
     -o BatchMode=yes \

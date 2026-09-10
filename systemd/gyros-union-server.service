@@ -5,9 +5,12 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+# User= es la unica linea que sigue siendo especifica de cada host (no se
+# puede leer de .env) -- ajustar al usuario real de esta maquina al desplegar.
 User=robot
 WorkingDirectory=/opt/gyros/agent
-ExecStart=/usr/bin/python3 -m union.server
+EnvironmentFile=/opt/gyros/agent/.env
+ExecStart=/usr/bin/env ${PYTHON_BIN} -m union.server
 Restart=always
 RestartSec=5
 StandardOutput=journal
